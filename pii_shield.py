@@ -61,16 +61,14 @@ _VERHOEFF_P = [
     [7, 0, 4, 6, 9, 1, 3, 2, 5, 8],
 ]
 
-
 def _verhoeff_valid(number: str) -> bool:
     digits = [int(d) for d in number if d.isdigit()]
-    if len(digits) != 12:
+    if len(digits)!= 12:
         return False
     c = 0
     for i, d in enumerate(reversed(digits)):
         c = _VERHOEFF_D[c][_VERHOEFF_P[i % 8][d]]
     return c == 0
-
 
 # ----------------------------------------------------------------------------
 # Detector registry. Order matters: more specific / higher-risk patterns first
