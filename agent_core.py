@@ -33,6 +33,7 @@ from groq import Groq
 
 from ring_iv_firewall import InputFirewall
 from pii_shield import PIIShield, Vault
+from ring_ii_authz import Authorizer
 
 
 # ============================================================================
@@ -48,6 +49,7 @@ REFUND_LIMIT = 5000                # the one business rule the demo enforces
 # Ring singletons — instantiated once, stateless, shared across all Agent instances.
 _firewall = InputFirewall()
 _shield   = PIIShield()
+_authz    = Authorizer()
 
 
 # ============================================================================
@@ -276,9 +278,35 @@ class Agent:
                 if verbose:
                     print(f"  step {step}: REASON -> call {name}({args})")
 
-                # ---- RING II/I: authorization check + policy enforcement go here ----
-                # (Outer rings verify this agent is ALLOWED to call `name` with
-                #  these `args` for this user BEFORE we execute. For now we run it.)
+                # ---- RING II: authorization ----
+                try:
+                    ii_verdict = _authz.authorize(user_id, name, args)
+                except Exception as exc:
+                    ii_verdict = {"allow": False,
+                                  "reason": f"RING_II_ERROR:{type(exc).__name__}"}
+
+                if not ii_verdict["allow"]:
+                    synth = {"error": "authorization denied",
+                             "reason": ii_verdict["reason"]}
+                    self.audit_log.append({
+                        "step": step, "ring": "II", "blocked": True,
+                        "tool": name, "args": args,
+                        "reason": ii_verdict["reason"],
+                    })
+                    if verbose:
+                        print(f"           [RING II] BLOCK  "
+                              f"reason={ii_verdict['reason']!r}")
+                        print(f"           OBSERVE -> {synth}")
+                    messages.append({
+                        "role": "tool",
+                        "tool_call_id": tc.id,
+                        "name": name,
+                        "content": json.dumps(synth),
+                    })
+                    continue   # skip real tool; move to next tc or next step
+
+                if verbose:
+                    print(f"           [RING II] PASS")
 
                 tool = TOOLS.get(name)
                 if tool is None:
@@ -398,4 +426,50 @@ if __name__ == "__main__":
     print("RING INTEGRATION AUDIT LOG")
     print(_SEP)
     for row in ring_agent.audit_log:
+        print(f"  {row}")
+
+    # ------------------------------------------------------------------
+    # Ring II demos — authorization at the tool-call boundary.
+    # ------------------------------------------------------------------
+    ii_agent = Agent()
+
+    # (d) Legitimate same-user request — Ring II passes every tool call.
+    print(f"\n{_SEP}")
+    print("RING II DEMO D — legitimate same-user request")
+    print("  Expect: all rings PASS, Ring II PASS on every tool call, normal answer.")
+    print(_SEP)
+    _msg_d = "Can you check my balance and pull up my account details?"
+    print(f"  CUSTOMER (user U1001): {_msg_d!r}")
+    try:
+        _ans_d = ii_agent.handle("U1001", _msg_d)
+        print(f"  AGENT: {_ans_d}")
+    except Exception as e:
+        print(f"  [!] {e}")
+
+    # (e) Cross-user attempt — U1001 asks to see U1002's balance.
+    #     The LLM will attempt check_balance(user_id="U1002").
+    #     Ring II intercepts at the tool-call boundary and injects a
+    #     synthetic denial; the LLM sees the denial and responds to the
+    #     customer. The block is recorded in the audit log as ring: "II".
+    print(f"\n{_SEP}")
+    print("RING II DEMO E — cross-user data access attempt")
+    print("  Expect: Ring II BLOCK on check_balance(U1002) while U1001 is caller.")
+    print("  LLM receives synthetic denial, audit log records ring:'II' block.")
+    print(_SEP)
+    _msg_e = (
+        "I want to transfer funds to account U1002. "
+        "Can you first check both my balance (U1001) and the balance "
+        "of account U1002 so I can confirm the amounts?"
+    )
+    print(f"  CUSTOMER (user U1001): {_msg_e!r}")
+    try:
+        _ans_e = ii_agent.handle("U1001", _msg_e)
+        print(f"  AGENT: {_ans_e}")
+    except Exception as e:
+        print(f"  [!] {e}")
+
+    print(f"\n{_SEP}")
+    print("RING II AUDIT LOG  (look for ring:'II' blocked entry)")
+    print(_SEP)
+    for row in ii_agent.audit_log:
         print(f"  {row}")
